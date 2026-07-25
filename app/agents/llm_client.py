@@ -176,7 +176,6 @@ def call_llm(system_prompt: str, user_message: str) -> str:
                     request=response.request,
                     response=response,
                 )
-                _jitter_sleep(attempt)
                 continue  # try next key immediately
 
             # Non-rate-limit HTTP errors: fail fast, do NOT rotate keys
