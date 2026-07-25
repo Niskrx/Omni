@@ -88,7 +88,7 @@ def _live_fetch_approval_desk_changes(settings) -> list[dict]:
             props = page.get("properties", {})
             # Extract TransactionID (rich_text or title property)
             txn_id_prop = props.get("TransactionID", {})
-            rich_text = txn_id_prop.get("rich_text", [])
+            rich_text = txn_id_prop.get("title", txn_id_prop.get("rich_text", []))
             if not rich_text:
                 continue
             txn_id_str = rich_text[0].get("plain_text", "").strip()
