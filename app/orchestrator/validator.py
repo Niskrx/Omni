@@ -134,6 +134,8 @@ def evaluate_eligibility(ctx: TransactionContext, transcript: Sequence[Proposal]
     if final_prop.originated_by == "Orchestrator" and final_prop.status == ProposalStatus.REJECTED:
         if "Round limit" in final_prop.rationale:
             triggers.append("Negotiation round cap reached")
+        if "LLM offline" in final_prop.rationale:
+            triggers.append("LLM Unavailable (System Offline)")
             
     if triggers:
         return EligibilityClassification.ELIGIBLE_PENDING_REVIEW, triggers
