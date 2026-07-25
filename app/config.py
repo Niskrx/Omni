@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # Polling fallback: enabled automatically when push webhooks are not configured.
     # Set NOTION_POLLING_ENABLED=true in .env to force polling regardless.
     notion_polling_enabled: bool = False
-    notion_polling_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    notion_polling_interval_seconds: int = Field(default=5, ge=5, le=3600)
 
     # ── Gmail ────────────────────────────────────────────────────────────────
     gmail_client_id: str = Field(default="mock-gmail-client-id")

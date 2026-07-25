@@ -61,8 +61,12 @@ async def create_application(app_data: ApplicationCreate, background_tasks: Back
     transaction_store.upsert(ctx)
     transaction_store.add_progress(transaction_id, 1, "Application received & validated", f"Applicant: {app_data.customer_name}")
     
+    def run_pipeline_sync(context, app_id):
+        import asyncio
+        asyncio.run(_run_dashboard_pipeline(context, app_id))
+
     loop = asyncio.get_running_loop()
-    loop.create_task(_run_dashboard_pipeline(ctx, applicant_id))
+    loop.run_in_executor(None, run_pipeline_sync, ctx, applicant_id)
     
     return ApplicationResponse(transaction_id=transaction_id)
 
