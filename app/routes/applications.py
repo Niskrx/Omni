@@ -121,15 +121,19 @@ async def _run_dashboard_pipeline(ctx: TransactionContext, applicant_id: str):
         except Exception as exc:
             log.error("simulate.compression_error", error=str(exc))
             
-    if not summary and error:
-        # Create a mock compressed summary
+    if not summary:
+        # Create a mock compressed summary using whatever transcript we have
         from app.orchestrator.history import CompressedSummary
+        bullets = ["• " + result.reason] if result else ["• LLM offline before processing began."]
+        if result and result.transcript:
+            bullets.extend([f"• {p.originated_by}: {p.rationale}" for p in result.transcript])
+            
         summary = CompressedSummary(
             transaction_id=ctx.transaction_id,
-            agents_involved=["Orchestrator"],
+            agents_involved=[p.originated_by for p in result.transcript] if result and result.transcript else ["Orchestrator"],
             route=route,
-            outcome="REJECTED",
-            bullets=["• " + result.summary],
+            outcome=result.final_proposal.status.value if result and result.final_proposal else "REJECTED",
+            bullets=bullets,
             policy_version="unknown",
             compressed_at=datetime.now(timezone.utc)
         )
