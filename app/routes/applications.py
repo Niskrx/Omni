@@ -114,7 +114,7 @@ async def _run_dashboard_pipeline(ctx: TransactionContext, applicant_id: str):
         from app.integrations.gmail import send_verdict_email
         send_verdict_email(ctx)
 
-    if (eligibility == EligibilityClassification.ELIGIBLE_AUTO or eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW) and summary:
+    if eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW and summary:
         try:
             from app.integrations.notion_audit import NotionAuditClient
             client = NotionAuditClient()
@@ -127,10 +127,30 @@ async def _run_dashboard_pipeline(ctx: TransactionContext, applicant_id: str):
         from app.integrations.slack import send_review_queue_alert
         send_review_queue_alert(ctx, summary)
 
-    if eligibility == EligibilityClassification.ELIGIBLE_AUTO or eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
+    if eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
         transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Pending manager approval")
     elif final_status == TransactionStatus.APPROVED:
-        transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Awaiting credit confirmation")
+        from app.services.downstream import execute_approved_transaction
+        import asyncio
+        updated_ctx = transaction_store.mark_credited(ctx.transaction_id, "System Auto-Approval")
+        
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(execute_approved_transaction(updated_ctx))
+        except RuntimeError:
+            asyncio.run(execute_approved_transaction(updated_ctx))
+            
+        transaction_store.add_progress(
+            ctx.transaction_id, 
+            10, 
+            "Credit/disbursement confirmed", 
+            "Funds autonomously released by agents"
+        )
+        from app.integrations.slack import send_credit_confirmed_alert
+        send_credit_confirmed_alert(updated_ctx)
+        
+        from app.integrations.gmail import send_credit_confirmation_email
+        send_credit_confirmation_email(updated_ctx)
     elif final_status == TransactionStatus.REJECTED:
         transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Disbursement halted")
 

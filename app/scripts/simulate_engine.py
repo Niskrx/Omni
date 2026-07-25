@@ -127,7 +127,7 @@ async def run_simulation(
         send_verdict_email(ctx)
 
     # ── Push to Manager Approval Desk if eligible ────────────────────────────
-    if (eligibility == EligibilityClassification.ELIGIBLE_AUTO or eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW) and summary:
+    if eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW and summary:
         try:
             from app.integrations.notion_audit import NotionAuditClient
             client = NotionAuditClient()
@@ -140,11 +140,30 @@ async def run_simulation(
         from app.integrations.slack import send_review_queue_alert
         send_review_queue_alert(ctx, summary)
             
-    # Always light up step 10 at the end (unless it completely crashed before)
-    if eligibility == EligibilityClassification.ELIGIBLE_AUTO or eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
+    if eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
         transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Pending manager approval")
     elif final_status == TransactionStatus.APPROVED:
-        transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Funds released")
+        from app.services.downstream import execute_approved_transaction
+        import asyncio
+        updated_ctx = transaction_store.mark_credited(ctx.transaction_id, "System Auto-Approval")
+        
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(execute_approved_transaction(updated_ctx))
+        except RuntimeError:
+            asyncio.run(execute_approved_transaction(updated_ctx))
+            
+        transaction_store.add_progress(
+            ctx.transaction_id, 
+            10, 
+            "Credit/disbursement confirmed", 
+            "Funds autonomously released by agents"
+        )
+        from app.integrations.slack import send_credit_confirmed_alert
+        send_credit_confirmed_alert(updated_ctx)
+        
+        from app.integrations.gmail import send_credit_confirmation_email
+        send_credit_confirmation_email(updated_ctx)
     elif final_status == TransactionStatus.REJECTED:
         transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Disbursement halted")
 
@@ -218,15 +237,15 @@ from app.models.transaction import EligibilityClassification
 def _map_final_status(result: NegotiationResult, eligibility: EligibilityClassification) -> TransactionStatus:
     if eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
         return TransactionStatus.ESCALATED
-    if eligibility == EligibilityClassification.ELIGIBLE_AUTO:
-        # It's approved by agents, but waits for manager confirmation
-        # However, backend may treat it as ESCALATED or APPROVED initially.
-        # Let's say ESCALATED because it's on the Manager Approval Desk,
-        # but the prompt says: "eligible_auto (no issues -> creates Manager Approval Desk card with ReviewType = 'Release Confirmation')"
-        # So it is ESCALATED (awaiting human action), but with a different card type.
-        return TransactionStatus.ESCALATED
     if eligibility in (EligibilityClassification.NEEDS_ALTERATION_SUBSIDY_MISMATCH, EligibilityClassification.NEEDS_ALTERATION_INSUFFICIENT_FUNDS):
         return TransactionStatus.REJECTED
-    if result.accepted:
+        
+    if not result.accepted:
+        # Agent autonomous rejection (e.g., ambiguity, unmet criteria)
+        return TransactionStatus.REJECTED
+        
+    if eligibility == EligibilityClassification.ELIGIBLE_AUTO:
+        # Autonomous approval (bypasses human manager)
         return TransactionStatus.APPROVED
+        
     return TransactionStatus.REJECTED
