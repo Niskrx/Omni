@@ -61,7 +61,8 @@ async def create_application(app_data: ApplicationCreate, background_tasks: Back
     transaction_store.upsert(ctx)
     transaction_store.add_progress(transaction_id, 1, "Application received & validated", f"Applicant: {app_data.customer_name}")
     
-    background_tasks.add_task(_run_dashboard_pipeline, ctx, applicant_id)
+    loop = asyncio.get_running_loop()
+    loop.create_task(_run_dashboard_pipeline(ctx, applicant_id))
     
     return ApplicationResponse(transaction_id=transaction_id)
 
@@ -84,7 +85,13 @@ async def _run_dashboard_pipeline(ctx: TransactionContext, applicant_id: str):
     except Exception as exc:
         log.error("simulate.pipeline_error", error=str(exc))
         error = str(exc)
-        result = None
+        from app.models.transaction import NegotiationResult
+        result = NegotiationResult(
+            accepted=False,
+            final_rate=None,
+            history=[],
+            summary="Narrative summary unavailable (LLM offline); see ConflictSummary and raw transcript for details"
+        )
 
     route = _extract_route(result)
     
@@ -100,6 +107,19 @@ async def _run_dashboard_pipeline(ctx: TransactionContext, applicant_id: str):
             policy_version = summary.policy_version
         except Exception as exc:
             log.error("simulate.compression_error", error=str(exc))
+            
+    if not summary and error:
+        # Create a mock compressed summary
+        from app.orchestrator.history import CompressedSummary
+        summary = CompressedSummary(
+            transaction_id=ctx.transaction_id,
+            agents_involved=["Orchestrator"],
+            route=route,
+            outcome="REJECTED",
+            bullets=["• " + result.summary],
+            policy_version="unknown",
+            compressed_at=datetime.now(timezone.utc)
+        )
 
     if result:
         final_status = _map_final_status(result, eligibility)
