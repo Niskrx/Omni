@@ -101,12 +101,17 @@ def _live_fetch_approval_desk_changes(settings) -> list[dict]:
             note_rich_text = note_prop.get("rich_text", [])
             manager_note = note_rich_text[0].get("plain_text", "").strip() if note_rich_text else None
 
+            # Extract Editor
+            last_edited_by = page.get("last_edited_by", {})
+            actor_name = last_edited_by.get("name", "Manager")
+
             if txn_id_str and status_val in ("Approved", "Rejected"):
                 changes.append({
                     "transaction_id": txn_id_str,
                     "new_status": status_val,
                     "notion_page_id": page.get("id", ""),
                     "manager_note": manager_note,
+                    "actor_name": actor_name,
                 })
         return changes
 
@@ -154,12 +159,14 @@ async def _poll_once(settings) -> None:
             log.debug("notion_poller.already_resolved", transaction_id=str(txn_id))
             continue
 
+        actor_name = change.get("actor_name", "notion_poller")
+
         payload = NotionStatusChangePayload(
             transaction_id=txn_id,
             new_status=new_status,
             notion_page_id=notion_page_id,
             manager_note=manager_note,
-            actor="notion_poller"
+            actor=actor_name
         )
 
         log.info("notion_poller.processing", transaction_id=str(txn_id), new_status=new_status)

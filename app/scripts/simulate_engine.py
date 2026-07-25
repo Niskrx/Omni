@@ -98,7 +98,9 @@ async def run_simulation(
 
     # ── Determine route from the first Proposal in the transcript ─────────────
     route = _extract_route(result)
-    requires_human = _check_human_review(result)
+    
+    from app.orchestrator.validator import evaluate_eligibility
+    eligibility, triggers = evaluate_eligibility(ctx, result.transcript if result else [])
 
     # ── Compress transcript → push to Notion Audit Feed ───────────────────────
     policy_version = "unknown"
@@ -113,31 +115,38 @@ async def run_simulation(
 
     # ── Update shared store with final status ─────────────────────────────────
     if result:
-        final_status = _map_final_status(result, requires_human)
+        final_status = _map_final_status(result, eligibility)
     else:
         final_status = TransactionStatus.REJECTED
     transaction_store.set_status(ctx.transaction_id, final_status)
     verdict_text = generate_verdict_text(ctx)
     transaction_store.add_progress(ctx.transaction_id, 8, "Verdict issued", verdict_text)
 
-    # ── Push to Manager Approval Desk if escalated ────────────────────────────
-    if final_status == TransactionStatus.ESCALATED and summary:
+    if final_status != TransactionStatus.ESCALATED and eligibility not in (EligibilityClassification.ELIGIBLE_AUTO, EligibilityClassification.ELIGIBLE_PENDING_REVIEW):
+        from app.integrations.gmail import send_verdict_email
+        send_verdict_email(ctx)
+
+    # ── Push to Manager Approval Desk if eligible ────────────────────────────
+    if (eligibility == EligibilityClassification.ELIGIBLE_AUTO or eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW) and summary:
         try:
             from app.integrations.notion_audit import NotionAuditClient
             client = NotionAuditClient()
-            client.create_approval_desk_entry(ctx, summary)
+            client.create_approval_desk_entry(ctx, summary, eligibility=eligibility, triggers=triggers)
             log.info("simulate.manager_desk_pushed", transaction_id=str(ctx.transaction_id))
             transaction_store.add_progress(ctx.transaction_id, 9, "Manager decision", "Awaiting human review")
         except Exception as exc:
             log.error("simulate.manager_desk_push_failed", error=str(exc))
             
+        from app.integrations.slack import send_review_queue_alert
+        send_review_queue_alert(ctx, summary)
+            
     # Always light up step 10 at the end (unless it completely crashed before)
-    if final_status == TransactionStatus.APPROVED:
+    if eligibility == EligibilityClassification.ELIGIBLE_AUTO or eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
+        transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Pending manager approval")
+    elif final_status == TransactionStatus.APPROVED:
         transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Funds released")
     elif final_status == TransactionStatus.REJECTED:
         transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Disbursement halted")
-    elif final_status == TransactionStatus.ESCALATED:
-        transaction_store.add_progress(ctx.transaction_id, 10, "Credit/disbursement confirmed", "Pending manager approval")
 
     sim_result = SimulationResult(
         transaction_id=ctx.transaction_id,
@@ -148,7 +157,7 @@ async def run_simulation(
         route=route,
         rounds=result.rounds if result else 0,
         outcome_reason=result.reason if result else (error or "unknown"),
-        requires_human_review=requires_human,
+        requires_human_review=(eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW),
         policy_version=policy_version,
         started_at=started_at,
         completed_at=datetime.now(timezone.utc),
@@ -160,7 +169,7 @@ async def run_simulation(
         transaction_id=str(ctx.transaction_id),
         final_status=final_status,
         rounds=sim_result.rounds,
-        requires_human_review=requires_human,
+        eligibility=eligibility.value,
     )
     return sim_result
 
@@ -204,22 +213,20 @@ def _extract_route(result: NegotiationResult | None) -> str:
     return "A->B->C"
 
 
-def _check_human_review(result: NegotiationResult | None) -> bool:
-    if result is None:
-        return True
-    for p in result.transcript:
-        if p.metadata.get("requires_human_review") == "true":
-            return True
-    if not result.accepted and result.rounds >= 1:
-        last = result.final_proposal
-        if last.metadata.get("requires_human_review") == "true":
-            return True
-    return False
+from app.models.transaction import EligibilityClassification
 
-
-def _map_final_status(result: NegotiationResult, requires_human: bool) -> TransactionStatus:
-    if requires_human:
+def _map_final_status(result: NegotiationResult, eligibility: EligibilityClassification) -> TransactionStatus:
+    if eligibility == EligibilityClassification.ELIGIBLE_PENDING_REVIEW:
         return TransactionStatus.ESCALATED
+    if eligibility == EligibilityClassification.ELIGIBLE_AUTO:
+        # It's approved by agents, but waits for manager confirmation
+        # However, backend may treat it as ESCALATED or APPROVED initially.
+        # Let's say ESCALATED because it's on the Manager Approval Desk,
+        # but the prompt says: "eligible_auto (no issues -> creates Manager Approval Desk card with ReviewType = 'Release Confirmation')"
+        # So it is ESCALATED (awaiting human action), but with a different card type.
+        return TransactionStatus.ESCALATED
+    if eligibility in (EligibilityClassification.NEEDS_ALTERATION_SUBSIDY_MISMATCH, EligibilityClassification.NEEDS_ALTERATION_INSUFFICIENT_FUNDS):
+        return TransactionStatus.REJECTED
     if result.accepted:
         return TransactionStatus.APPROVED
     return TransactionStatus.REJECTED

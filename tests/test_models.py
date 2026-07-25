@@ -36,7 +36,7 @@ def test_transaction_context_defaults():
     ctx = _make_ctx()
     assert ctx.status == TransactionStatus.PENDING
     assert ctx.currency == "USD"
-    assert ctx.mock_credit_score == 700
+    assert ctx.credit_score == 700
     assert ctx.mock_annual_income == Decimal("50000.00")
 
 

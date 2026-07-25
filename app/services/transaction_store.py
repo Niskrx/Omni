@@ -31,6 +31,7 @@ class TransactionStore:
         self._lock = threading.Lock()
         self._data: dict[UUID, TransactionContext] = {}
         self._progress: dict[UUID, list[dict]] = {}
+        self._executed_tools: dict[UUID, set[str]] = {}
 
     # ── Writes ────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,23 @@ class TransactionStore:
             })
             self._data[transaction_id] = updated
             log.info("transaction_store.decision_updated", transaction_id=str(transaction_id), decision_type=decision_type)
+            return updated
+
+    def mark_credited(self, transaction_id: UUID, credited_by: str) -> TransactionContext | None:
+        """
+        Mark a transaction as credited manually.
+        """
+        from datetime import datetime, timezone
+        with self._lock:
+            ctx = self._data.get(transaction_id)
+            if ctx is None:
+                return None
+            updated = ctx.model_copy(update={
+                "credited_by": credited_by,
+                "credited_at": datetime.now(timezone.utc)
+            })
+            self._data[transaction_id] = updated
+            log.info("transaction_store.marked_credited", transaction_id=str(transaction_id), credited_by=credited_by)
             return updated
 
     def add_progress(self, transaction_id: UUID, step_num: int, name: str, detail: str) -> None:
@@ -112,6 +130,16 @@ class TransactionStore:
             ]
 
     # ── Guards ────────────────────────────────────────────────────────────────
+
+    def has_executed_tool(self, transaction_id: UUID, tool_key: str) -> bool:
+        with self._lock:
+            return tool_key in self._executed_tools.get(transaction_id, set())
+
+    def mark_tool_executed(self, transaction_id: UUID, tool_key: str) -> None:
+        with self._lock:
+            if transaction_id not in self._executed_tools:
+                self._executed_tools[transaction_id] = set()
+            self._executed_tools[transaction_id].add(tool_key)
 
     def is_resolved(self, transaction_id: UUID) -> bool:
         """

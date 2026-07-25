@@ -137,6 +137,8 @@ def simulate_tax_registry(applicant_id: UUID | str) -> dict:
         "_disclaimer": "This is entirely synthetic data generated for workflow simulation."
     }
 
+_treasury_calls: dict[str, int] = {}
+
 def simulate_treasury_ledger(transaction_id: UUID | str) -> dict:
     """
     Return a deterministic treasury fund state for testing Agent C.
@@ -151,6 +153,12 @@ def simulate_treasury_ledger(transaction_id: UUID | str) -> dict:
     if "66726f7a656e" in hex_id:
         status = "Frozen"
         balance = Decimal("100000.00")
+    elif "deadbeef" in hex_id:
+        status = "Active"
+        calls = _treasury_calls.get(txn_id_str, 0) + 1
+        _treasury_calls[txn_id_str] = calls
+        balances = {1: Decimal("20000.00"), 2: Decimal("10000.00"), 3: Decimal("5000.00"), 4: Decimal("2000.00")}
+        balance = balances.get(calls, Decimal("1000.00"))
     elif "696e73756666696369656e74" in hex_id:
         status = "Active"
         balance = Decimal("5000.00")  # Less than requested in tests

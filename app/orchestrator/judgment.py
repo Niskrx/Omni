@@ -1,43 +1,36 @@
-from dataclasses import dataclass
+from decimal import Decimal
 
-@dataclass
-class IncomeProportionalityResult:
-    ratio: float
-    band: str  # "Proportionate" | "Elevated" | "High"
-    requires_human_review: bool
-    note: str
-    cited_clause: str
+def calculate_household_adjustment_factor(married: bool, dependents: int) -> float:
+    """
+    1 - (0.05 * dependents) - (0.05 if married else 0), floor at 0.6
+    """
+    factor = 1.0 - (0.05 * dependents) - (0.05 if married else 0.0)
+    return max(0.6, factor)
 
-def calculate_income_proportionality(
-    requested_amount: float, annual_declared_income: float
-) -> IncomeProportionalityResult:
+def calculate_proportionality_ratio(loan_amount: float | Decimal, annual_income: float | Decimal, haf: float) -> float:
     """
-    Pure deterministic function. No LLM call. Bands:
-      ratio <= 0.5            -> Proportionate, requires_human_review=False
-      0.5 < ratio <= 1.5      -> Elevated, requires_human_review=True
-      ratio > 1.5             -> High, requires_human_review=True
-    Guard against annual_declared_income == 0 (raise ValueError, don't
-    divide by zero or silently default).
+    loan_amount / (annual_income * haf); raise ValueError if annual_income <= 0
     """
-    if annual_declared_income == 0:
-        raise ValueError("annual_declared_income cannot be zero.")
-        
-    ratio = requested_amount / annual_declared_income
+    loan_amount_float = float(loan_amount)
+    annual_income_float = float(annual_income)
     
-    if ratio <= 0.5:
-        band = "Proportionate"
-        requires_human_review = False
-    elif ratio <= 1.5:
-        band = "Elevated"
-        requires_human_review = True
-    else:
-        band = "High"
-        requires_human_review = True
+    if annual_income_float <= 0:
+        raise ValueError("Annual income must be greater than 0")
         
-    return IncomeProportionalityResult(
-        ratio=ratio,
-        band=band,
-        requires_human_review=requires_human_review,
-        note=f"Income proportionality ratio is {ratio:.2f} ({band}).",
-        cited_clause="Section I, Clause 3"
-    )
+    adjusted_income = annual_income_float * haf
+    if adjusted_income <= 0:
+        raise ValueError("Adjusted income must be greater than 0")
+        
+    return loan_amount_float / adjusted_income
+
+def is_disproportionate(ratio: float) -> bool:
+    """
+    ratio > 0.30
+    """
+    return ratio > 0.30
+
+def is_credit_score_flagged(credit_score: int) -> bool:
+    """
+    credit_score < 650
+    """
+    return credit_score < 650

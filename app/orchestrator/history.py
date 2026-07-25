@@ -208,9 +208,7 @@ class TranscriptCompressor:
             log.error("history.compression_llm_failed", error=str(exc))
             # Graceful degradation: produce a minimal summary without LLM.
             bullets = [
-                f"• Requested: {ctx.requested_amount} {ctx.currency} by {ctx.customer_name}.",
-                f"• Route: {route}.",
-                f"• Outcome: {outcome} (summary unavailable — LLM offline).",
+                "• Narrative summary unavailable (LLM offline); see ConflictSummary and raw transcript for details"
             ]
             
         # Append deterministic verdict text

@@ -358,6 +358,7 @@ class TestNotionAuditClient:
         )
 
         client = NotionAuditClient()
+        client._settings.use_mock_notion = True
         result = client.create_audit_entry(ctx=ctx, summary=summary)
 
         props = result["properties"]
@@ -386,7 +387,9 @@ class TestNotionAuditClient:
             raw_transcript_json="[]",
         )
 
-        result = NotionAuditClient().create_audit_entry(ctx=ctx, summary=summary)
+        client = NotionAuditClient()
+        client._settings.use_mock_notion = True
+        result = client.create_audit_entry(ctx=ctx, summary=summary)
         for bullet in bullets:
             assert bullet in result["properties"]["Summary"]
 

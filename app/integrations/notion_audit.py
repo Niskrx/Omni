@@ -134,9 +134,10 @@ class NotionAuditClient:
             log.error("notion_audit.create_entry_failed", error=str(exc))
             raise NotionAuditError(f"Failed to write audit entry: {exc}") from exc
 
-    def create_approval_desk_entry(self, ctx: TransactionContext, summary) -> dict:
+    def create_approval_desk_entry(self, ctx: TransactionContext, summary, eligibility=None, triggers=None) -> dict:
         """Create a card on the Manager Approval Desk for escalated transactions."""
         from app.orchestrator.history import CompressedSummary
+        from app.models.transaction import EligibilityClassification
         assert isinstance(summary, CompressedSummary)
 
         if self._settings.use_mock_notion:
@@ -146,6 +147,49 @@ class NotionAuditClient:
         database_id = getattr(self._settings, "notion_approval_desk_id", "mock-desk-db")
         trigger_display = "Subsidy Loan" if "loan" in ctx.transaction_type.value.lower() else "Emergency Payout"
         
+        review_type = "Release Confirmation" if eligibility == EligibilityClassification.ELIGIBLE_AUTO else "Judgment Required"
+        
+        # Build pure Python conflict summary
+        def build_conflict_summary(triggers: list[str] | None, txn_id) -> str:
+            lines = []
+            if triggers:
+                for t in triggers:
+                    if "PR > 0.30" in t:
+                        try:
+                            pr_pct = (float(ctx.requested_amount) / float(ctx.annual_declared_income)) * 100
+                            lines.append(f"• Flagged under Section I, Clause 6 — requested amount is {pr_pct:.1f}% of declared annual income.")
+                        except (ValueError, ZeroDivisionError):
+                            lines.append("• Flagged under Section I, Clause 6 — Proportionality check failed.")
+                    elif "Frozen fund" in t:
+                        lines.append("• Flagged under Section I, Clause 5 — Target fund is frozen.")
+                    else:
+                        lines.append(f"• Flagged: {t}")
+            else:
+                lines.append("No conflict detected. Agents reached consensus.")
+                
+            # Add negotiation rounds
+            from app.services.transaction_store import transaction_store
+            from app.orchestrator.history import transcript_store
+            
+            raw_transcript = transcript_store.get_raw_transcript(txn_id)
+            if raw_transcript:
+                lines.append("\nNegotiation History:")
+                # Determine rounds by looking at the sequence
+                # A round usually starts with a proposal from one agent, and then another responds.
+                round_num = 1
+                for i in range(0, len(raw_transcript) - 1, 2):
+                    p1 = raw_transcript[i]
+                    p2 = raw_transcript[i+1] if i+1 < len(raw_transcript) else None
+                    if p2:
+                        lines.append(f"Round {round_num}: {p1.originated_by} proposed ₹{p1.proposed_amount} -> {p2.originated_by} responded ({p2.status})")
+                    else:
+                        lines.append(f"Round {round_num}: {p1.originated_by} proposed ₹{p1.proposed_amount}")
+                    round_num += 1
+                    
+            return "\n".join(lines)
+            
+        conflict_summary_text = build_conflict_summary(triggers, ctx.transaction_id)
+        
         payload = {
             "parent": {"database_id": database_id},
             "properties": {
@@ -153,7 +197,9 @@ class NotionAuditClient:
                 "Amount": {"number": float(ctx.requested_amount)},
                 "Subject": {"rich_text": [{"text": {"content": f"{trigger_display} escalated for review."}}]},
                 "Status": {"select": {"name": "Awaiting Action"}},
-                "ConflictSummary": {"rich_text": [{"text": {"content": "\n".join(summary.bullets)[:2000]}}]}
+                "ReviewType": {"select": {"name": review_type}},
+                "DecidedBy": {"select": {"name": "Agents — Policy Match" if review_type == "Release Confirmation" else "Manager Decision"}},
+                "ConflictSummary": {"rich_text": [{"text": {"content": conflict_summary_text[:2000]}}]}
             }
         }
 

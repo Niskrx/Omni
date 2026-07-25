@@ -46,12 +46,13 @@ def _seed_escalated(txn_id: uuid.UUID) -> TransactionContext:
     return ctx
 
 
-def _webhook_payload(txn_id: uuid.UUID, new_status: str) -> dict:
+def _webhook_payload(txn_id: uuid.UUID, new_status: str, manager_note: str | None = "Test note") -> dict:
     return {
         "transaction_id": str(txn_id),
         "new_status": new_status,
         "notion_page_id": "fake-notion-page-id",
         "actor": "notion_webhook",
+        "manager_note": manager_note,
     }
 
 
@@ -73,18 +74,17 @@ class TestApprovedPath:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["action_taken"] == "approved_and_executed"
+        assert body["action_taken"] == "approved_awaiting_credit"
         assert transaction_store.get(txn_id).status == TransactionStatus.APPROVED
 
     @pytest.mark.asyncio
-    async def test_approved_triggers_downstream(self):
+    async def test_approved_never_calls_downstream(self):
         txn_id = uuid.uuid4()
         _seed_escalated(txn_id)
 
         with patch(
             "app.routes.webhooks.execute_approved_transaction",
             new_callable=AsyncMock,
-            return_value={"gmail": "MOCK", "slack": "MOCK", "ledger": "MOCK"},
         ) as mock_exec:
             client = _fresh_app()
             response = client.post(
@@ -92,7 +92,7 @@ class TestApprovedPath:
                 json=_webhook_payload(txn_id, "Approved"),
             )
             assert response.status_code == 200
-            mock_exec.assert_awaited_once()
+            mock_exec.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_approved_records_audit_event(self):

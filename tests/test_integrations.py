@@ -15,11 +15,8 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from app.integrations.gmail import GmailClient, GmailError, TOOL_KEY as GMAIL_TOOL_KEY
-from app.integrations.slack import SlackClient, SlackError, TOOL_KEY as SLACK_TOOL_KEY
 from app.integrations.mock_services import simulate_location
-
+import smtplib
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -37,206 +34,166 @@ def _mock_settings(**overrides):
         setattr(s, k, v)
     return s
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # GMAIL TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestGmailSandbox:
-    """Gmail calls only ever hit sandbox destinations in dev."""
+class TestGmailIntegration:
 
-    @pytest.mark.asyncio
-    async def test_mock_mode_returns_mock_response(self):
-        client = GmailClient()
-        executed: set[str] = set()
-        txn_id = uuid.uuid4()
-        result = await client.send_loan_agreement(
-            to="real-customer@bank.com",
-            transaction_id=txn_id,
-            amount="25000",
-            currency="INR",
-            executed_tools=executed,
-        )
-        assert result.get("_mock") is True
+    def test_mock_mode_returns_true(self):
+        from app.integrations.gmail import send_applicant_email
+        settings = _mock_settings(use_mock_gmail=True)
+        with patch("app.integrations.gmail.get_settings", return_value=settings):
+            with patch("app.integrations.mock_services.mock_gmail_send") as mock_send:
+                result = send_applicant_email("a@b.com", "subject", "body")
+                assert result is True
+                mock_send.assert_called_once_with("a@b.com", "subject", "body")
 
-    @pytest.mark.asyncio
-    async def test_live_mode_redirects_to_sandbox(self):
-        """Even with use_mock_gmail=false, live calls must go to sandbox address, not customer."""
-        settings = _mock_settings(use_mock_gmail=False, gmail_sandbox_to="sandbox@mockbank.example.com")
+    def test_missing_credentials_returns_false(self):
+        from app.integrations.gmail import send_applicant_email
+        settings = _mock_settings(use_mock_gmail=False, gmail_sender_address="", gmail_app_password="")
+        with patch("app.integrations.gmail.get_settings", return_value=settings):
+            result = send_applicant_email("a@b.com", "subject", "body")
+            assert result is False
 
-        sent_to_addresses = []
+    def test_smtp_auth_error_is_swallowed(self):
+        from app.integrations.gmail import send_applicant_email
+        settings = _mock_settings(use_mock_gmail=False, gmail_sender_address="sender", gmail_app_password="pass")
+        with patch("app.integrations.gmail.get_settings", return_value=settings):
+            with patch("smtplib.SMTP_SSL", side_effect=smtplib.SMTPAuthenticationError(535, "Auth failed")):
+                result = send_applicant_email("a@b.com", "subject", "body")
+                assert result is False
 
-        async def _fake_send(self_inner, to, subject, body):
-            sent_to_addresses.append(to)
-            return {"id": "fake", "to": to, "_live": True}
+    def test_successful_smtp_send(self):
+        from app.integrations.gmail import send_applicant_email
+        settings = _mock_settings(use_mock_gmail=False, gmail_sender_address="sender", gmail_app_password="pass")
+        with patch("app.integrations.gmail.get_settings", return_value=settings):
+            mock_server = MagicMock()
+            with patch("smtplib.SMTP_SSL", return_value=mock_server):
+                # mock context manager
+                mock_server.__enter__.return_value = mock_server
+                
+                result = send_applicant_email("a@b.com", "subject", "body")
+                
+                assert result is True
+                mock_server.login.assert_called_once_with("sender", "pass")
+                mock_server.send_message.assert_called_once()
 
-        with patch("app.integrations.gmail.get_settings", return_value=settings), \
-             patch.object(GmailClient, "_get_access_token", new_callable=AsyncMock, return_value="tok"), \
-             patch.object(GmailClient, "send_notification", new_callable=AsyncMock, side_effect=_fake_send):
+    def test_idempotency_verdict_email(self):
+        from app.integrations.gmail import send_verdict_email
+        from app.services.transaction_store import transaction_store
+        
+        ctx = MagicMock()
+        ctx.transaction_id = uuid.uuid4()
+        
+        settings = _mock_settings(use_mock_gmail=True)
+        with patch("app.integrations.gmail.get_settings", return_value=settings):
+            with patch("app.integrations.gmail.send_applicant_email", return_value=True) as mock_send:
+                with patch("app.integrations.gmail.generate_verdict_text", return_value="verdict"):
+                    # Call 1
+                    send_verdict_email(ctx)
+                    assert mock_send.call_count == 1
+                    # Call 2
+                    send_verdict_email(ctx)
+                    assert mock_send.call_count == 1  # Not incremented due to idempotency
 
-            client = GmailClient()
-            client._settings = settings
-            executed: set[str] = set()
-            safe_to = client._safe_recipient("real-customer@bank.com")
-            assert safe_to == "sandbox@mockbank.example.com"
-            assert safe_to != "real-customer@bank.com"
+    def test_idempotency_credit_confirmation_email(self):
+        from app.integrations.gmail import send_credit_confirmation_email
+        from app.services.transaction_store import transaction_store
+        
+        ctx = MagicMock()
+        ctx.transaction_id = uuid.uuid4()
+        ctx.credited_by = "Manager"
+        ctx.credited_at = None
+        
+        settings = _mock_settings(use_mock_gmail=True)
+        with patch("app.integrations.gmail.get_settings", return_value=settings):
+            with patch("app.integrations.gmail.send_applicant_email", return_value=True) as mock_send:
+                with patch("app.integrations.gmail.generate_verdict_text", return_value="verdict"):
+                    # Call 1
+                    send_credit_confirmation_email(ctx)
+                    assert mock_send.call_count == 1
+                    # Call 2
+                    send_credit_confirmation_email(ctx)
+                    assert mock_send.call_count == 1  # Not incremented due to idempotency
 
-
-class TestGmailIdempotency:
-    """Calling send_loan_agreement twice with the same TransactionID sends only one email."""
-
-    @pytest.mark.asyncio
-    async def test_second_call_is_skipped(self):
-        client = GmailClient()
-        executed: set[str] = set()
-        txn_id = uuid.uuid4()
-
-        result1 = await client.send_loan_agreement("a@b.com", txn_id, "10000", "INR", executed)
-        result2 = await client.send_loan_agreement("a@b.com", txn_id, "10000", "INR", executed)
-
-        assert result1.get("_mock") is True
-        assert result2.get("skipped") is True
-        assert result2["reason"] == "already_sent"
-
-    @pytest.mark.asyncio
-    async def test_different_txn_ids_both_send(self):
-        client = GmailClient()
-        executed: set[str] = set()
-
-        r1 = await client.send_loan_agreement("a@b.com", uuid.uuid4(), "10000", "INR", executed)
-        r2 = await client.send_loan_agreement("a@b.com", uuid.uuid4(), "10000", "INR", executed)
-
-        assert r1.get("_mock") is True
-        assert r2.get("_mock") is True
-        assert len(executed) == 2
-
-    @pytest.mark.asyncio
-    async def test_executed_tools_set_updated(self):
-        client = GmailClient()
-        executed: set[str] = set()
-        txn_id = uuid.uuid4()
-
-        await client.send_loan_agreement("a@b.com", txn_id, "10000", "INR", executed)
-        assert f"{GMAIL_TOOL_KEY}:{txn_id}" in executed
-
-
-class TestGmailErrorHandling:
-    """Gmail failures are caught, logged, and re-raised as GmailError."""
-
-    @pytest.mark.asyncio
-    async def test_network_error_raises_gmail_error(self):
-        import httpx
-        settings = _mock_settings(use_mock_gmail=False, gmail_sandbox_to="sandbox@test.com")
-
-        with patch("app.integrations.gmail.get_settings", return_value=settings), \
-             patch.object(GmailClient, "_get_access_token", new_callable=AsyncMock, return_value="tok"), \
-             patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("timeout")):
-
-            client = GmailClient()
-            client._settings = settings
-            with pytest.raises(GmailError, match="Failed to send email"):
-                await client.send_notification("x@y.com", "subj", "body")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SLACK TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestSlackSandbox:
-    """Slack messages only ever hit sandbox channels in dev."""
+from app.integrations.slack import post_slack_message, send_review_queue_alert, send_credit_confirmed_alert
 
-    @pytest.mark.asyncio
-    async def test_mock_mode_returns_mock_response(self):
-        client = SlackClient()
-        executed: set[str] = set()
-        txn_id = uuid.uuid4()
-        result = await client.post_branch_alert(txn_id, "Test alert", executed)
-        assert result.get("_mock") is True
+class TestSlackIntegration:
+    """Tests for the rewritten Slack integration."""
 
-    def test_live_mode_redirects_to_sandbox_channel(self):
-        settings = _mock_settings(
-            use_mock_slack=False,
-            slack_sandbox_channel="bank-sim-test",
-            app_env="development",
-        )
+    def test_mock_mode_skips_network(self):
+        settings = _mock_settings(use_mock_slack=True)
         with patch("app.integrations.slack.get_settings", return_value=settings):
-            client = SlackClient()
-            client._settings = settings
-            channel = client._safe_channel()
-            assert channel == "bank-sim-test"
-            assert channel != "C00000000"
+            with patch("httpx.post") as mock_post:
+                result = post_slack_message("http://fake", "test")
+                assert result is True
+                mock_post.assert_not_called()
 
+    def test_live_mode_calls_network(self):
+        settings = _mock_settings(use_mock_slack=False)
+        with patch("app.integrations.slack.get_settings", return_value=settings):
+            with patch("httpx.post") as mock_post:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_post.return_value = mock_resp
+                
+                result = post_slack_message("http://fake", "test")
+                
+                assert result is True
+                mock_post.assert_called_once()
+                mock_resp.raise_for_status.assert_called_once()
 
-class TestSlackIdempotency:
-    """Calling post_branch_alert twice with the same TransactionID sends only one message."""
-
-    @pytest.mark.asyncio
-    async def test_second_call_is_skipped(self):
-        client = SlackClient()
-        executed: set[str] = set()
-        txn_id = uuid.uuid4()
-
-        result1 = await client.post_branch_alert(txn_id, "Alert 1", executed)
-        result2 = await client.post_branch_alert(txn_id, "Alert 2", executed)
-
-        assert result1.get("_mock") is True
-        assert result2.get("skipped") is True
-        assert result2["reason"] == "already_posted"
-
-    @pytest.mark.asyncio
-    async def test_different_txn_ids_both_post(self):
-        client = SlackClient()
-        executed: set[str] = set()
-
-        r1 = await client.post_branch_alert(uuid.uuid4(), "Alert A", executed)
-        r2 = await client.post_branch_alert(uuid.uuid4(), "Alert B", executed)
-
-        assert r1.get("_mock") is True
-        assert r2.get("_mock") is True
-        assert len(executed) == 2
-
-    @pytest.mark.asyncio
-    async def test_executed_tools_set_updated(self):
-        client = SlackClient()
-        executed: set[str] = set()
-        txn_id = uuid.uuid4()
-
-        await client.post_branch_alert(txn_id, "Alert", executed)
-        assert f"{SLACK_TOOL_KEY}:{txn_id}" in executed
-
-
-class TestSlackErrorHandling:
-    """Slack failures are caught, logged, and re-raised as SlackError."""
-
-    @pytest.mark.asyncio
-    async def test_network_error_raises_slack_error(self):
+    def test_network_failure_is_swallowed(self):
+        """Slack failures are caught, logged, and return False (do not raise)."""
         import httpx
-        settings = _mock_settings(use_mock_slack=False, slack_sandbox_channel="test")
+        settings = _mock_settings(use_mock_slack=False)
+        with patch("app.integrations.slack.get_settings", return_value=settings):
+            with patch("httpx.post", side_effect=httpx.HTTPError("timeout")):
+                result = post_slack_message("http://fake", "test")
+                assert result is False
 
-        with patch("app.integrations.slack.get_settings", return_value=settings), \
-             patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("timeout")):
+    def test_idempotency_review_queue(self):
+        """send_review_queue_alert uses transaction_store for idempotency."""
+        from app.services.transaction_store import transaction_store
+        ctx = MagicMock()
+        ctx.transaction_id = uuid.uuid4()
+        summary = MagicMock()
+        
+        settings = _mock_settings(use_mock_slack=True)
+        with patch("app.integrations.slack.get_settings", return_value=settings):
+            with patch("app.integrations.slack.post_slack_message") as mock_post:
+                # First call should post
+                send_review_queue_alert(ctx, summary)
+                assert mock_post.call_count == 1
+                
+                # Second call should be skipped
+                send_review_queue_alert(ctx, summary)
+                assert mock_post.call_count == 1
 
-            client = SlackClient()
-            client._settings = settings
-            with pytest.raises(SlackError, match="Failed to post to Slack"):
-                await client.post_message("test message", channel="test-chan")
-
-    @pytest.mark.asyncio
-    async def test_slack_api_ok_false_raises_slack_error(self):
-        settings = _mock_settings(use_mock_slack=False, slack_bot_token="xoxb-real")
-
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"ok": False, "error": "channel_not_found"}
-
-        with patch("app.integrations.slack.get_settings", return_value=settings), \
-             patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp):
-
-            client = SlackClient()
-            client._settings = settings
-            with pytest.raises(SlackError, match="channel_not_found"):
-                await client.post_message("test", channel="bad-channel")
-
+    def test_idempotency_credit_confirmed(self):
+        """send_credit_confirmed_alert uses transaction_store for idempotency."""
+        from app.services.transaction_store import transaction_store
+        ctx = MagicMock()
+        ctx.transaction_id = uuid.uuid4()
+        
+        settings = _mock_settings(use_mock_slack=True)
+        with patch("app.integrations.slack.get_settings", return_value=settings):
+            with patch("app.integrations.slack.post_slack_message") as mock_post:
+                with patch("app.integrations.slack.generate_verdict_text", return_value="verdict"):
+                    # First call should post
+                    send_credit_confirmed_alert(ctx)
+                    assert mock_post.call_count == 1
+                    
+                    # Second call should be skipped
+                    send_credit_confirmed_alert(ctx)
+                    assert mock_post.call_count == 1
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GPS / LOCATION MOCK TESTS

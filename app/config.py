@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     gmail_client_secret: str = Field(default="mock-gmail-client-secret")
     gmail_refresh_token: str = Field(default="mock-gmail-refresh-token")
     gmail_sender_address: str = Field(default="no-reply@mockbank.example.com")
+    gmail_app_password: str = Field(default="mock-gmail-app-password")
     # In dev/staging, all outbound emails are redirected here instead of the
     # real customer address. Leave blank to use gmail_sender_address as fallback.
     gmail_sandbox_to: str = Field(default="sandbox@mockbank.example.com")

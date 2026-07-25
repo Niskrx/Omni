@@ -163,12 +163,15 @@ async def _handle_approved(payload: NotionStatusChangePayload, ctx) -> WebhookRe
     txn_id = payload.transaction_id
     actor = payload.actor
     log.info("webhook.approved", transaction_id=str(txn_id))
+    
+    if payload.notion_page_id:
+        _append_manager_verdict(payload.notion_page_id, "Approved", actor)
 
     # Update decision properties
     transaction_store.update_decision(
         transaction_id=txn_id,
-        decision_type="MANAGER_DECISION",
-        decision_maker="Manager",
+        decision_type="MANAGER_MANUAL",
+        decision_maker=actor,
         decision_reason=payload.manager_note
     )
 
@@ -180,6 +183,9 @@ async def _handle_approved(payload: NotionStatusChangePayload, ctx) -> WebhookRe
     verdict_text = generate_verdict_text(updated_ctx)
     transaction_store.add_progress(txn_id, 8, "Verdict issued", verdict_text)
 
+    from app.integrations.gmail import send_verdict_email
+    send_verdict_email(updated_ctx)
+
     audit_feed.record(
         transaction_id=txn_id,
         event_type=AuditEventType.APPROVED,
@@ -188,17 +194,16 @@ async def _handle_approved(payload: NotionStatusChangePayload, ctx) -> WebhookRe
     )
 
     # Execute downstream tools (Gmail/Slack/ledger).
-    downstream_results = await execute_approved_transaction(updated_ctx)
+    # Removed execute_approved_transaction here because credit is now a manual confirmation step.
 
     log.info(
         "webhook.approved.complete",
-        transaction_id=str(txn_id),
-        downstream=downstream_results,
+        transaction_id=str(txn_id)
     )
     return WebhookResponse(
         transaction_id=txn_id,
-        action_taken="approved_and_executed",
-        message="Transaction approved. Downstream execution complete.",
+        action_taken="approved_awaiting_credit",
+        message="Transaction approved. Awaiting manual credit confirmation.",
     )
 
 
@@ -210,6 +215,9 @@ def _handle_rejected(payload: NotionStatusChangePayload) -> WebhookResponse:
     txn_id = payload.transaction_id
     actor = payload.actor
     log.info("webhook.rejected", transaction_id=str(txn_id))
+    
+    if payload.notion_page_id:
+        _append_manager_verdict(payload.notion_page_id, "Rejected", actor)
 
     # Rejecting requires a note
     if not payload.manager_note:
@@ -221,8 +229,8 @@ def _handle_rejected(payload: NotionStatusChangePayload) -> WebhookResponse:
     # Update decision properties
     transaction_store.update_decision(
         transaction_id=txn_id,
-        decision_type="MANAGER_DECISION",
-        decision_maker="Manager",
+        decision_type="MANAGER_MANUAL",
+        decision_maker=actor,
         decision_reason=payload.manager_note
     )
 
@@ -232,6 +240,9 @@ def _handle_rejected(payload: NotionStatusChangePayload) -> WebhookResponse:
     from app.orchestrator.verdict import generate_verdict_text
     verdict_text = generate_verdict_text(updated_ctx)
     transaction_store.add_progress(txn_id, 8, "Verdict issued", verdict_text)
+
+    from app.integrations.gmail import send_verdict_email
+    send_verdict_email(updated_ctx)
 
     audit_feed.record(
         transaction_id=txn_id,
@@ -246,3 +257,47 @@ def _handle_rejected(payload: NotionStatusChangePayload) -> WebhookResponse:
         action_taken="rejected",
         message="Transaction rejected. Audit entry recorded. No downstream execution.",
     )
+
+
+def _append_manager_verdict(page_id: str, verdict: str, actor: str) -> None:
+    """Appends the manager verdict to the ConflictSummary property in Notion."""
+    import httpx
+    from app.config import get_settings
+    
+    settings = get_settings()
+    if settings.use_mock_notion or not settings.notion_token:
+        return
+        
+    headers = {
+        "Authorization": f"Bearer {settings.notion_token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+    
+    try:
+        with httpx.Client(timeout=10) as client:
+            # 1. Fetch current page properties
+            resp = client.get(f"https://api.notion.com/v1/pages/{page_id}", headers=headers)
+            resp.raise_for_status()
+            props = resp.json().get("properties", {})
+            
+            conflict_summary_prop = props.get("ConflictSummary", {})
+            rich_text_list = conflict_summary_prop.get("rich_text", [])
+            current_text = "".join(rt.get("plain_text", "") for rt in rich_text_list)
+            
+            # 2. Append new line
+            new_text = current_text + f"\n• Manager Verdict: {verdict} by {actor}"
+            
+            # 3. Patch property
+            patch_payload = {
+                "properties": {
+                    "ConflictSummary": {
+                        "rich_text": [{"text": {"content": new_text[:2000]}}]
+                    }
+                }
+            }
+            patch_resp = client.patch(f"https://api.notion.com/v1/pages/{page_id}", json=patch_payload, headers=headers)
+            patch_resp.raise_for_status()
+            
+    except Exception as exc:
+        log.error("webhook.append_verdict_failed", page_id=page_id, error=str(exc))

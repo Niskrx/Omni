@@ -57,7 +57,7 @@ def assess_risk(ctx: TransactionContext, route: str) -> AgentBResponse:
         f"- Applicant ID: {ctx.customer_id}\n"
         f"- Applicant Name: {ctx.customer_name}\n"
         f"- Route: {route}\n"
-        f"- Mock Credit Score: {ctx.mock_credit_score}\n"
+        f"- Credit Score: {ctx.credit_score}\n"
         f"- Mock Annual Income: {ctx.mock_annual_income}\n"
         f"- Guarantor: {guarantor_info}\n"
         f"- Tax Registry Flags: {tax_data['flags']}\n"

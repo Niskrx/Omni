@@ -35,6 +35,13 @@ class TransactionStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class EligibilityClassification(StrEnum):
+    NEEDS_ALTERATION_SUBSIDY_MISMATCH = "needs_alteration_subsidy_mismatch"
+    NEEDS_ALTERATION_INSUFFICIENT_FUNDS = "needs_alteration_insufficient_funds"
+    ELIGIBLE_AUTO = "eligible_auto"
+    ELIGIBLE_PENDING_REVIEW = "eligible_pending_review"
+
+
 class TransactionContext(BaseModel):
     """
     Immutable snapshot of a banking transaction passed through the orchestrator.
@@ -60,11 +67,20 @@ class TransactionContext(BaseModel):
     account_id: UUID = Field(default_factory=uuid4, description="Mock account UUID")
 
     # ── Risk / scoring (all synthetic) ──────────────────────────────────────
-    mock_credit_score: int = Field(
+    credit_score: int = Field(
         default=700,
         ge=300,
-        le=850,
+        le=900,
         description="Synthetic credit score – not from any real credit bureau",
+    )
+    marital_status: str = Field(
+        default="Single",
+        description="'Single' or 'Married'",
+    )
+    dependents: int = Field(
+        default=0,
+        ge=0,
+        description="Number of dependents",
     )
     annual_declared_income: Decimal = Field(
         default=Decimal("50000.00"),
@@ -93,6 +109,15 @@ class TransactionContext(BaseModel):
     decision_type: str = Field(default="AGENT_AUTOMATED", description="'AGENT_AUTOMATED' or 'MANAGER_DECISION'")
     decision_maker: str | None = Field(default=None, description="Who made the decision (e.g. 'Manager')")
     decision_reason: str | None = Field(default=None, description="Reason for decision, required for rejected manager decisions")
+    
+    # ── Ledger Tracking ──────────────────────────────────────────────────────
+    credited_by: str | None = Field(default=None, description="Who manually confirmed the credit")
+    credited_at: datetime | None = Field(default=None, description="Timestamp of manual credit confirmation")
+
+    @property
+    def mock_annual_income(self) -> Decimal:
+        """Alias for backward compatibility with older components."""
+        return self.annual_declared_income
 
 
 class AgentRoutingDecision(BaseModel):

@@ -162,7 +162,7 @@ class TestSimulateEngine:
     async def test_emergency_payout_escalates_on_frozen_fund(self, mock_push, mock_hist, mock_c, mock_a):
         mock_a.return_value = '{"route": "A->C", "cited_clause": "Section I, Clause 2"}'
         # Frozen fund → TREASURY_REJECT with requiresHumanReview
-        mock_c.return_value = '{"status": "TREASURY_REJECT", "availableAmount": 0, "citedClause": "Section I, Clause 4", "requiresHumanReview": true}'
+        mock_c.return_value = '{"status": "TREASURY_REJECT", "availableAmount": 0, "citedClause": "Section I, Clause 4", "requiresHumanReview": true, "notes": "Frozen fund."}'
         mock_hist.return_value = json.dumps(["• Emergency payout.", "• Frozen fund.", "• ESCALATED."])
 
         result = await run_simulation("emergency_payout", "APP-005")
