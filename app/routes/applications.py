@@ -90,11 +90,20 @@ async def _run_dashboard_pipeline(ctx: TransactionContext, applicant_id: str):
         log.error("simulate.pipeline_error", error=str(exc))
         error = str(exc)
         from app.models.transaction import NegotiationResult
+        from app.models.proposal import Proposal, ProposalStatus
         result = NegotiationResult(
             accepted=False,
-            final_rate=None,
-            history=[],
-            summary="Narrative summary unavailable (LLM offline); see ConflictSummary and raw transcript for details"
+            final_proposal=Proposal(
+                transaction_id=ctx.transaction_id,
+                originated_by="Orchestrator",
+                status=ProposalStatus.REJECTED,
+                proposed_amount=ctx.requested_amount,
+                metadata={"requires_human_review": "false"},
+                rationale="LLM offline"
+            ),
+            rounds=0,
+            transcript=[],
+            reason="LLM offline"
         )
 
     route = _extract_route(result)
@@ -246,7 +255,10 @@ def get_customer_application_status(transaction_id: UUID):
     
     current_idx = 0
     if 1 in step_nums: current_idx = 1
-    # If 8 (Verdict issued) is present, it means the automated part is done.
+    if 2 in step_nums: current_idx = 2
+    if 3 in step_nums: current_idx = 3
+    if 4 in step_nums: current_idx = 4
+    if 5 in step_nums: current_idx = 5
     if 8 in step_nums: current_idx = 6
     if ctx.status in [TransactionStatus.APPROVED, TransactionStatus.REJECTED]:
         current_idx = 7
