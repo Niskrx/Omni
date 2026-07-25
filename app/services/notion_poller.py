@@ -170,10 +170,13 @@ async def _poll_once(settings) -> None:
         )
 
         log.info("notion_poller.processing", transaction_id=str(txn_id), new_status=new_status)
-        if new_status == "Approved":
-            await _handle_approved(payload, ctx)
-        elif new_status == "Rejected":
-            _handle_rejected(payload)
+        try:
+            if new_status == "Approved":
+                await _handle_approved(payload, ctx)
+            elif new_status == "Rejected":
+                _handle_rejected(payload)
+        except Exception as exc:
+            log.error("notion_poller.processing_error", transaction_id=str(txn_id), error=str(exc))
 
 
 async def _polling_loop(interval: int, settings) -> None:
